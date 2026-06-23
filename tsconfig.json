@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    // Target a modern Node 20 runtime.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    // Use native ESM (matches "type": "module" in package.json).
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    // Interop / correctness niceties.
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    // Strictness — catch mistakes early (helpful for a beginner).
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // We run with tsx and don't emit compiled JS, so type-check only.
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}
