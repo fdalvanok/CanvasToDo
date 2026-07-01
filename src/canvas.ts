@@ -63,8 +63,26 @@ function getConfig(): { baseUrl: string; token: string } {
   if (!baseUrl) throw new Error("CANVAS_BASE_URL is not set");
   if (!token) throw new Error("CANVAS_TOKEN is not set");
 
-  // Strip a trailing slash so we can safely join paths with a leading slash.
-  return { baseUrl: baseUrl.replace(/\/$/, ""), token };
+  // We don't normalize here — joinUrl() handles slashes for every request.
+  return { baseUrl, token };
+}
+
+/**
+ * Join a base URL and a path with exactly one slash between them, no matter
+ * how many trailing slashes the base has or whether the path starts with one.
+ *
+ * This prevents two easy mistakes:
+ *   - base ".../api/v1"  + path "users/self" -> ".../api/v1users/self"  (missing slash)
+ *   - base ".../api/v1/" + path "/users/self" -> ".../api/v1//users/self" (double slash)
+ *
+ * Examples:
+ *   joinUrl("https://x/api/v1",  "/users/self") -> "https://x/api/v1/users/self"
+ *   joinUrl("https://x/api/v1//", "users/self") -> "https://x/api/v1/users/self"
+ */
+function joinUrl(base: string, path: string): string {
+  const trimmedBase = base.replace(/\/+$/, ""); // drop any trailing slashes
+  const trimmedPath = path.replace(/^\/+/, ""); // drop any leading slashes
+  return `${trimmedBase}/${trimmedPath}`;
 }
 
 /**
@@ -96,12 +114,21 @@ function getNextPageUrl(linkHeader: string | null): string | null {
  * Fetch every page of a paginated Canvas list endpoint and return the combined
  * results as a single flat array.
  *
- * The first request goes to `startUrl`; subsequent requests follow the
+ * The first request URL is built from `baseUrl` + `path` via joinUrl(), so the
+ * slash between them is always correct. Subsequent requests follow the
  * rel="next" link until Canvas stops sending one.
  */
-async function paginate<T>(startUrl: string, token: string): Promise<T[]> {
+async function paginate<T>(
+  baseUrl: string,
+  path: string,
+  token: string,
+): Promise<T[]> {
   const results: T[] = [];
-  let url: string | null = startUrl;
+
+  // Build the first page URL robustly. The next-page URLs come from the Link
+  // header and are already absolute (they include the host and query string),
+  // so we use them as-is rather than re-joining them to baseUrl.
+  let url: string | null = joinUrl(baseUrl, path);
 
   while (url) {
     const response: Response = await fetch(url, {
@@ -109,13 +136,15 @@ async function paginate<T>(startUrl: string, token: string): Promise<T[]> {
     });
 
     if (!response.ok) {
-      // 401 almost always means the token is wrong; give a friendly hint.
+      // Read the body so the error message is actually useful for debugging.
+      const body = await response.text();
+      const detail = `${response.status} ${response.statusText} for ${url}\n${body}`;
+
+      // 401 almost always means the token is wrong; give a friendly hint too.
       if (response.status === 401) {
-        throw new Error("Canvas token invalid or expired");
+        throw new Error(`Canvas token invalid or expired — ${detail}`);
       }
-      throw new Error(
-        `Canvas request failed: ${response.status} ${response.statusText} (${url})`,
-      );
+      throw new Error(`Canvas request failed: ${detail}`);
     }
 
     const page = (await response.json()) as T[];
@@ -140,7 +169,8 @@ export async function getUpcomingAssignments(): Promise<CanvasAssignment[]> {
 
   // 1. Active courses for the current user.
   const courses = await paginate<CanvasCourse>(
-    `${baseUrl}/users/self/courses?enrollment_state=active&per_page=100`,
+    baseUrl,
+    "/users/self/courses?enrollment_state=active&per_page=100",
     token,
   );
 
@@ -150,7 +180,8 @@ export async function getUpcomingAssignments(): Promise<CanvasAssignment[]> {
   //    keep the code simple and easy to follow.
   for (const course of courses) {
     const rawAssignments = await paginate<CanvasAssignmentRaw>(
-      `${baseUrl}/courses/${course.id}/assignments?bucket=upcoming&include[]=submission&per_page=100`,
+      baseUrl,
+      `/courses/${course.id}/assignments?bucket=upcoming&include[]=submission&per_page=100`,
       token,
     );
 
