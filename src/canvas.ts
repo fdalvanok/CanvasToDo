@@ -53,36 +53,48 @@ interface CanvasAssignmentRaw {
 }
 
 /**
- * Read and validate the Canvas configuration from the environment.
- * Throws a clear error if either variable is missing.
+ * Read and validate the Canvas access token from the environment.
+ * (The base URL is read + normalized in buildUrl().)
  */
-function getConfig(): { baseUrl: string; token: string } {
-  const baseUrl = process.env.CANVAS_BASE_URL;
+function getToken(): string {
   const token = process.env.CANVAS_TOKEN;
-
-  if (!baseUrl) throw new Error("CANVAS_BASE_URL is not set");
   if (!token) throw new Error("CANVAS_TOKEN is not set");
-
-  // We don't normalize here — joinUrl() handles slashes for every request.
-  return { baseUrl, token };
+  return token;
 }
 
 /**
- * Join a base URL and a path with exactly one slash between them, no matter
- * how many trailing slashes the base has or whether the path starts with one.
+ * Build a full Canvas API URL from a path, using CANVAS_BASE_URL as the root.
  *
- * This prevents two easy mistakes:
- *   - base ".../api/v1"  + path "users/self" -> ".../api/v1users/self"  (missing slash)
- *   - base ".../api/v1/" + path "/users/self" -> ".../api/v1//users/self" (double slash)
+ * It does two things so that requests are robust to how CANVAS_BASE_URL is
+ * written:
+ *
+ * 1. Joins base + path with exactly one "/" between them — it strips any
+ *    trailing slash(es) from the base and any leading slash(es) from the path.
+ *    (Otherwise ".../api/v1" + "users/self" -> ".../api/v1users/self".)
+ *
+ * 2. Makes sure the base points at the Canvas REST API root (".../api/v1").
+ *    Canvas endpoints live under /api/v1; if CANVAS_BASE_URL is just the site
+ *    root (e.g. https://school.instructure.com) the request hits the web UI and
+ *    Canvas returns an HTML "Page Not Found" page (a 404), not JSON. To avoid
+ *    that we append "/api/v1" when it isn't already there — so both
+ *    "https://school.instructure.com" and "https://school.instructure.com/api/v1"
+ *    work.
  *
  * Examples:
- *   joinUrl("https://x/api/v1",  "/users/self") -> "https://x/api/v1/users/self"
- *   joinUrl("https://x/api/v1//", "users/self") -> "https://x/api/v1/users/self"
+ *   buildUrl("/users/self")  with base "https://x"          -> "https://x/api/v1/users/self"
+ *   buildUrl("users/self")   with base "https://x/api/v1/"  -> "https://x/api/v1/users/self"
  */
-function joinUrl(base: string, path: string): string {
-  const trimmedBase = base.replace(/\/+$/, ""); // drop any trailing slashes
+function buildUrl(path: string): string {
+  const raw = process.env.CANVAS_BASE_URL;
+  if (!raw) throw new Error("CANVAS_BASE_URL is not set");
+
+  let base = raw.replace(/\/+$/, ""); // drop any trailing slashes
+  if (!/\/api\/v\d+$/.test(base)) {
+    base = `${base}/api/v1`; // ensure we target the REST API root
+  }
+
   const trimmedPath = path.replace(/^\/+/, ""); // drop any leading slashes
-  return `${trimmedBase}/${trimmedPath}`;
+  return `${base}/${trimmedPath}`;
 }
 
 /**
@@ -114,23 +126,22 @@ function getNextPageUrl(linkHeader: string | null): string | null {
  * Fetch every page of a paginated Canvas list endpoint and return the combined
  * results as a single flat array.
  *
- * The first request URL is built from `baseUrl` + `path` via joinUrl(), so the
- * slash between them is always correct. Subsequent requests follow the
+ * The first request URL is built from `path` via buildUrl(), so the base URL
+ * and path are always joined correctly. Subsequent requests follow the
  * rel="next" link until Canvas stops sending one.
  */
-async function paginate<T>(
-  baseUrl: string,
-  path: string,
-  token: string,
-): Promise<T[]> {
+async function paginate<T>(path: string, token: string): Promise<T[]> {
   const results: T[] = [];
 
   // Build the first page URL robustly. The next-page URLs come from the Link
   // header and are already absolute (they include the host and query string),
-  // so we use them as-is rather than re-joining them to baseUrl.
-  let url: string | null = joinUrl(baseUrl, path);
+  // so we use them as-is rather than rebuilding them from the base.
+  let url: string | null = buildUrl(path);
 
   while (url) {
+    // Log the exact URL so failures are easy to diagnose in the CI logs.
+    console.log("Fetching:", url);
+
     const response: Response = await fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -165,11 +176,10 @@ async function paginate<T>(
  * 3. Flatten everything into one array of CanvasAssignment.
  */
 export async function getUpcomingAssignments(): Promise<CanvasAssignment[]> {
-  const { baseUrl, token } = getConfig();
+  const token = getToken();
 
   // 1. Active courses for the current user.
   const courses = await paginate<CanvasCourse>(
-    baseUrl,
     "/users/self/courses?enrollment_state=active&per_page=100",
     token,
   );
@@ -180,7 +190,6 @@ export async function getUpcomingAssignments(): Promise<CanvasAssignment[]> {
   //    keep the code simple and easy to follow.
   for (const course of courses) {
     const rawAssignments = await paginate<CanvasAssignmentRaw>(
-      baseUrl,
       `/courses/${course.id}/assignments?bucket=upcoming&include[]=submission&per_page=100`,
       token,
     );
